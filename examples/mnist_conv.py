@@ -5,7 +5,7 @@ from keras.utils import np_utils
 from layers.dense import Dense
 from layers.convolutional import Convolutional
 from layers.reshape import Reshape
-from activations.activations import Sigmoid
+from activations.Sigmoid import Sigmoid
 from losses.losses import binary_cross_entropy, binary_cross_entropy_prime
 from network import train, evaluate
 
