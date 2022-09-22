@@ -1,97 +1,168 @@
-import numpy as np
-from layers.layer import Layer
-from activations.Sigmoid import Sigmoid
+import numpy as np  # Matrix and vector computation package
 
-class Recurrent(Layer):
-    def __init__(self, num_steps, hidden_dim, output_dim, learning_rate):
-        self.num_steps = num_steps
-        self.bptt_truncate = 5
-        self.min_clip_value = -10
-        self.max_clip_value = 10
-        self.learning_rate = learning_rate
+#Backwardstepping
+#Output Gradient
+def mse_prime(y, t):
+    """
+    Gradient of the MSE loss function with respect to the output y.
+    """
+    return 2. * (y - t)
 
-        self.U = np.random.uniform(0, 1, (hidden_dim, num_steps))
-        self.W = np.random.uniform(0, 1, (hidden_dim, hidden_dim))
-        self.V = np.random.uniform(0, 1, (output_dim, hidden_dim))
 
-        self.dU = np.zeros(self.U.shape)
-        self.dV = np.zeros(self.V.shape)
-        self.dW = np.zeros(self.W.shape)
-        
-        self.dU_t = np.zeros(self.U.shape)
-        self.dV_t = np.zeros(self.V.shape)
-        self.dW_t = np.zeros(self.W.shape)
-        
-        self.dU_i = np.zeros(self.U.shape)
-        self.dW_i = np.zeros(self.W.shape)
+
+class LinearRecurrentCell:
+    def __init__(self, X, t, W, W_del, W_sgn, eta_p, eta_n) -> None:
+        self.X = X
+        self.t = t
+        self.W = W
+        self.W_del = W_del
+        self.W_sgn = W_sgn
+        self.eta_p = eta_p
+        self.eta_n = eta_n
+
+
+
+    #Forwardstepping
+    def update_state(self, xk, sk, wx, wRec):
+        """
+        Compute state k from the previous state (sk) and current 
+        input (xk), by use of the input weights (wx) and recursive 
+        weights (wRec).
+        """
+        return xk * wx + sk * wRec
+
+
+    def forward_states(self, X, wx, wRec):
+        """
+        Unfold the network and compute all state activations 
+        given the input X, input weights (wx), and recursive weights 
+        (wRec). Return the state activations in a matrix, the last 
+        column S[:,-1] contains the final activations.
+        """
+        # Initialise the matrix that holds all states for all 
+        #  input sequences. The initial state s0 is set to 0.
+        S = np.zeros((X.shape[0], X.shape[1]+1))
+        # Use the recurrence relation defined by update_state to update 
+        #  the states trough time.
+        for k in range(0, X.shape[1]):
+            # S[k] = S[k-1] * wRec + X[k] * wx
+            S[:,k+1] = self.update_state(X[:,k], S[:,k], wx, wRec)
+        return S
+
+
+
+
+    def backward_gradient(self, X, S, grad_out, wRec):
+        """
+        Backpropagate the gradient computed at the output (grad_out) 
+        through the network. Accumulate the parameter gradients for 
+        wX and wRec by for each layer by addition. Return the parameter 
+        gradients as a tuple, and the gradients at the output of each layer.
+        """
+        # Initialise the array that stores the gradients of the loss with 
+        #  respect to the states.
+        grad_over_time = np.zeros((X.shape[0], X.shape[1]+1))
+        grad_over_time[:,-1] = grad_out
+        # Set the gradient accumulations to 0
+        wx_grad = 0
+        wRec_grad = 0
+        for k in range(X.shape[1], 0, -1):
+            # Compute the parameter gradients and accumulate the results.
+            wx_grad += np.sum(
+                np.mean(grad_over_time[:,k] * X[:,k-1], axis=0))
+            wRec_grad += np.sum(
+                np.mean(grad_over_time[:,k] * S[:,k-1]), axis=0)
+            # Compute the gradient at the output of the previous layer
+            grad_over_time[:,k-1] = grad_over_time[:,k] * wRec
+        return (wx_grad, wRec_grad), grad_over_time
+
+    # Define Rprop optimisation function
+    def update_rprop(self, X, t, W, W_prev_sign, W_delta, eta_p, eta_n):
+        """
+        Update RProp values in one iteration.
+        Args:
+            X: input data.
+            t: targets.
+            W: Current weight parameters.
+            W_prev_sign: Previous sign of the W gradient.
+            W_delta: RProp update values (Delta).
+            eta_p, eta_n: RProp hyperparameters.
+        Returns:
+            (W_delta, W_sign): Weight update and sign of last weight
+                            gradient.
+        """
+        # Perform forward and backward pass to get the gradients
+        S = self.forward_states(X, W[0], W[1])
+        grad_out = mse_prime(S[:,-1], t)
+        W_grads, _ = self.backward_gradient(X, S, grad_out, W[1])
+        W_sign = np.sign(W_grads)  # Sign of new gradient
+        # Update the Delta (update value) for each weight 
+        #  parameter seperately
+        for i, _ in enumerate(W):
+            if W_sign[i] == W_prev_sign[i]:
+                W_delta[i] *= eta_p
+            else:
+                W_delta[i] *= eta_n
+        return W_delta, W_sign
+
+
+    def train(self):
+        for i in range(500):
+            # Get the update values and sign of the last gradient
+            W_delta, W_sign = self.update_rprop(
+                self.X, self.t, self.W, self.W_sgn, self.W_del, self.eta_p, self.eta_n)
+
+            self.W_del = W_delta
+            self.W_sgn = W_sign
+
+            # Update each weight parameter seperately
+            for i, _ in enumerate(self.W):
+                self.W[i] -= self.W_sgn[i] * self.W_del[i]
+            #ls_of_ws.append((W[0], W[1]))  # Add weights to list to plot
+
+        print(f'Final weights are: wx = {self.W[0]:.4f},  wRec = {self.W[1]:.4f}')
     
-    def sigmoid(self, x):
-        return 1 / (1 + np.exp(-x))
-
-    def forward(self, x, y, prev_s):
-        layers = []
-        for t in range(self.num_steps):
-            new_input = np.zeros(x.shape)
-            new_input[t] = x[t]
-            mul_u = np.dot(self.U, new_input)
-            mul_w = np.dot(self.W, prev_s)
-            add = mul_u + mul_w
-            s = self.sigmoid(add)
-            mul_v = np.dot(self.V, s)
-            layers.append({'s':s, 'prev_s':prev_s})
-            prev_s = s
-        return layers, (mul_v - y), add, mul_w, mul_u
+    def test(self, test_inpt):
+        test_outpt = self.forward_states(test_inpt, self.W[0], self.W[1])[:,-1]
+        sum_test_inpt = test_inpt.sum()
+        print((
+            f'Target output: {sum_test_inpt:d} vs Model output: '
+            f'{test_outpt[0]:.2f}'))
 
 
-    def backward(self, x, layers, dmul_v, add, mul_w, mul_u):
-        for t in range(self.num_steps):
-            dV_t = np.dot(dmul_v, layers[t]['s'].T)
-            dsv = np.dot(self.V.T, dmul_v)
-
-            ds = dsv
-            d_add = add * (1 - add) * ds
-
-            dmul_w = d_add * np.ones_like(mul_w)
-
-            dprev_s = np.dot(self.W.T, dmul_w)
-
-            for i in range(t-1, max(-1, t - self.bptt_truncate-1), -1):
-                ds = dsv + dprev_s
-                d_add = add * (1 - add) * ds
-
-                dmul_w = d_add * np.ones_like(mul_w)
-                dmul_u = d_add * np.ones_like(mul_u)
-
-                dW_i = np.dot(self.W, layers[t]['prev_s'])
-                dprev_s = np.dot(self.W.T, dmul_w)
-
-                new_input = np.zeros(x.shape)
-                new_input[t] = x[t]
-                dU_i = np.dot(self.U, new_input)
-                dx = np.dot(self.U.T, dmul_u)
-
-                self.dU_t += dU_i
-                self.dW_t += dW_i
-            
-            self.dV += dV_t
-            self.dU += self.dU_t
-            self.dW = self.dW_t
 
 
-            if self.dU.max() > self.max_clip_value:
-                self.dU[self.dU > self.max_clip_value] = self.max_clip_value
-            if self.dV.max() > self.max_clip_value:
-                self.dV[self.dV > self.max_clip_value] = self.max_clip_value
-            if self.dW.max() > self.max_clip_value:
-                self.dW[self.dW > self.max_clip_value] = self.max_clip_value
-            
-            if self.dU.min() < self.min_clip_value:
-                self.dU[self.dU < self.min_clip_value] = self.min_clip_value
-            if self.dV.min() < self.min_clip_value:
-                self.dV[self.dV < self.min_clip_value] = self.min_clip_value
-            if self.dW.min() < self.min_clip_value:
-                self.dW[self.dW < self.min_clip_value] = self.min_clip_value
-                # update
-        self.U -= self.learning_rate * self.dU
-        self.V -= self.learning_rate * self.dV
-        self.W -= self.learning_rate * self.dW
+
+
+#Dataset creation
+nb_of_samples = 20
+sequence_len = 16
+# Create the sequences
+X = np.zeros((nb_of_samples, sequence_len))
+for row_idx in range(nb_of_samples):
+    X[row_idx,:] = np.around(np.random.rand(sequence_len)).astype(int)
+# Create the targets for each sequence
+y = np.sum(X, axis=1)
+
+
+#Training
+# Perform Rprop optimisation
+# Set hyperparameters
+eta_p = 1.2
+eta_n = 0.5
+
+# Set initial parameters
+Weights = [-1.5, 2]  # [wx, wRec]
+W_delta = [0.001, 0.001]  # Update values (Delta) for W
+W_sign = [0, 0,]  # Previous sign of W
+
+#ls_of_ws = [(W[0], W[1])]  # List of weights to plot
+
+
+Lr = LinearRecurrentCell(X, y, Weights, W_delta, W_sign, eta_p, eta_n)
+Lr.train()
+
+
+#Testing
+test_inpt = np.asmatrix([[0, 1, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1]])
+Lr.test(test_inpt)
